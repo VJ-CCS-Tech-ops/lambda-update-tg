@@ -1,26 +1,27 @@
-import boto3
 import socket
+import boto3
 
-# Initialize clients for RDS and ELB
-rds_client = boto3.client('rds')
+# Initialize clients for ELB
 elbv2_client = boto3.client('elbv2')
-route53_client = boto3.client('route53')
 
 # Configuration variables
 rds_proxy_endpoint = 'your-rds-proxy-endpoint.amazonaws.com'
 target_group_arn = 'your-target-group-arn'
 
-def get_current_ip(endpoint):
-    return socket.gethostbyname(endpoint)
+def get_all_ips(endpoint):
+    # Retrieve all IP addresses associated with the endpoint
+    addresses = socket.getaddrinfo(endpoint, None)
+    # Filter and return only IPv4 addresses
+    return [addr[4][0] for addr in addresses if addr[1] == socket.SOCK_STREAM]
 
 def get_target_group_targets(target_group_arn):
     response = elbv2_client.describe_target_health(TargetGroupArn=target_group_arn)
     return [target['Target']['Id'] for target in response['TargetHealthDescriptions']]
 
-def register_new_target(target_group_arn, ip):
+def register_new_targets(target_group_arn, ips):
     elbv2_client.register_targets(
         TargetGroupArn=target_group_arn,
-        Targets=[{'Id': ip, 'Port': 3306}]
+        Targets=[{'Id': ip, 'Port': 3306} for ip in ips]
     )
 
 def deregister_old_targets(target_group_arn, targets):
@@ -30,14 +31,18 @@ def deregister_old_targets(target_group_arn, targets):
     )
 
 def lambda_handler(event, context):
-    current_ip = get_current_ip(rds_proxy_endpoint)
+    current_ips = get_all_ips(rds_proxy_endpoint)
     current_targets = get_target_group_targets(target_group_arn)
     
-    if current_ip not in current_targets:
-        deregister_old_targets(target_group_arn, current_targets)
-        register_new_target(target_group_arn, current_ip)
-        
+    # Determine which targets need to be deregistered
+    targets_to_deregister = [target for target in current_targets if target not in current_ips]
+    
+    # Register new targets
+    if targets_to_deregister:
+        deregister_old_targets(target_group_arn, targets_to_deregister)
+    register_new_targets(target_group_arn, current_ips)
+    
     return {
         'statusCode': 200,
-        'body': f'Successfully updated target group {target_group_arn} with IP {current_ip}'
+        'body': f'Successfully updated target group {target_group_arn} with IPs {current_ips}'
     }
